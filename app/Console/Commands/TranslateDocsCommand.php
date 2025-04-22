@@ -5,7 +5,6 @@ namespace App\Console\Commands;
 use App\Services\TranslateDocsService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
-use Symfony\Component\Finder\Finder;
 
 class TranslateDocsCommand extends Command
 {
@@ -14,14 +13,14 @@ class TranslateDocsCommand extends Command
      *
      * @var string
      */
-    protected $signature = 'docs:translate {--source= : Source directory} {--target= : Target directory}';
+    protected $signature = 'docs:translate {--source= : Source directory} {--target= : Target directory} {--latest : Only translate files updated in the last 24 hours}';
 
     /**
      * The console command description.
      *
      * @var string
      */
-    protected $description = 'Translate documentation files to Japanese using Claude API';
+    protected $description = 'Translate markdown documentation files to Japanese using Claude API';
 
     /**
      * Create a new command instance.
@@ -55,7 +54,9 @@ class TranslateDocsCommand extends Command
             return 1;
         }
 
-        $this->info("Starting translation of files from {$sourceDir} to {$targetDir}");
+        $this->info("Starting translation of Markdown files" .
+            ($this->option('latest') ? " updated in the last 24 hours" : "") .
+            " from {$sourceDir} to {$targetDir}");
 
         // Create target directory if it doesn't exist
         $targetBasePath = $docBaseDir . '/' . $targetDir;
@@ -64,21 +65,29 @@ class TranslateDocsCommand extends Command
         }
 
         // Count total translatable files for progress bar
-        $supportedExtensions = config('translation.supported_extensions', ['md', 'txt', 'html']);
-        $finder = new Finder();
-        $finder->files()
-            ->in($docBaseDir)
-            ->name(array_map(function($ext) { return "*.{$ext}"; }, $supportedExtensions))
-            ->notPath($targetDir);
+        $finder = File::allFiles($docBaseDir);
+        $mdFiles = array_filter($finder, function($file) use ($targetDir) {
+            return pathinfo($file, PATHINFO_EXTENSION) === 'md' &&
+                !str_contains($file, '/' . $targetDir . '/');
+        });
 
-        $totalFiles = iterator_count($finder);
+        // Filter by last modified time if --latest option is set
+        if ($this->option('latest')) {
+            $oneDayAgo = time() - (24 * 60 * 60);
+            $mdFiles = array_filter($mdFiles, function($file) use ($oneDayAgo) {
+                return filemtime($file) >= $oneDayAgo;
+            });
+            $this->info("Filtering for files updated in the last 24 hours");
+        }
+
+        $totalFiles = count($mdFiles);
 
         if ($totalFiles === 0) {
-            $this->info("No translatable files found in {$sourceDir}");
+            $this->info("No markdown files found" . ($this->option('latest') ? " updated in the last 24 hours" : "") . " in {$sourceDir}");
             return 0;
         }
 
-        $this->info("Found {$totalFiles} files to translate");
+        $this->info("Found {$totalFiles} markdown files to translate");
 
         // Create a progress bar
         $progressBar = $this->output->createProgressBar($totalFiles);
@@ -101,12 +110,13 @@ class TranslateDocsCommand extends Command
             $targetBasePath,
             $targetDir,
             $docBaseDir,
-            $progressCallback
+            $progressCallback,
+            $this->option('latest')
         );
 
         $progressBar->finish();
         $this->newLine(2);
-        $this->info('Translation completed successfully');
+        $this->info('Translation of markdown files completed successfully');
         return 0;
     }
 }

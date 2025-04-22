@@ -12,4 +12,3 @@ This document outlines the standards and best practices for creating database mi
 - Follow consistent naming conventions for all database objects
 - Choose appropriate column types based on content needs
 - Never use `$fillable` in models as the project uses `Model::unguard()`
-

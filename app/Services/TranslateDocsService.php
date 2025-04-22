@@ -28,26 +28,28 @@ class TranslateDocsService
      */
     public function __construct()
     {
-        $this->apiKey = config('translation.claude.api_key') ?? env('CLAUDE_API_KEY');
-        $this->apiUrl = config('translation.claude.api_url') ?? 'https://api.anthropic.com/v1/messages';
-        $this->model = config('translation.claude.model') ?? env('CLAUDE_MODEL', 'claude-3-5-sonnet-20240620');
+        $this->apiKey = config('translation.claude.api_key');
+        $this->apiUrl = config('translation.claude.api_url');
+        $this->model = config('translation.claude.model');
     }
 
     /**
-     * Process all files in a directory recursively.
+     * Process all markdown files in a directory recursively.
      *
      * @param string $sourcePath The source directory path
      * @param string $targetPath The target directory path
      * @param string $targetDir The name of the target directory
      * @param string $docBaseDir The base directory for documents
      * @param callable|null $progressCallback Optional callback for progress updates
+     * @param bool $latestOnly Only process files updated in the last 24 hours
      */
     public function processDirectory(
         string $sourcePath,
         string $targetPath,
         string $targetDir,
         string $docBaseDir,
-        ?callable $progressCallback = null
+        ?callable $progressCallback = null,
+        bool $latestOnly = false
     ): void {
         $files = File::files($sourcePath);
 
@@ -55,6 +57,19 @@ class TranslateDocsService
             // Skip if the file path contains the target directory
             if (str_contains($file->getPathname(), '/' . $targetDir . '/')) {
                 continue;
+            }
+
+            // Skip non-markdown files
+            if (pathinfo($file->getPathname(), PATHINFO_EXTENSION) !== 'md') {
+                continue;
+            }
+
+            // Skip files not modified in the last 24 hours if latestOnly is true
+            if ($latestOnly) {
+                $oneDayAgo = time() - (24 * 60 * 60);
+                if (filemtime($file->getPathname()) < $oneDayAgo) {
+                    continue;
+                }
             }
 
             // Get the path relative to the document base directory
@@ -93,64 +108,8 @@ class TranslateDocsService
                 File::makeDirectory($newTargetPath, 0755, true);
             }
 
-            // Process files in the subdirectory - pass the current directory and its target
-            $this->processFilesInDirectory($directory, $newTargetPath, $targetDir, $progressCallback);
-        }
-    }
-
-    /**
-     * Process just the files in a directory without recursion.
-     *
-     * @param string $sourcePath The source directory path
-     * @param string $targetPath The target directory path
-     * @param string $targetDir The name of the target directory
-     * @param callable|null $progressCallback Optional callback for progress updates
-     */
-    public function processFilesInDirectory(
-        string $sourcePath,
-        string $targetPath,
-        string $targetDir,
-        ?callable $progressCallback = null
-    ): void {
-        $files = File::files($sourcePath);
-
-        foreach ($files as $file) {
-            // Skip if the file path contains the target directory
-            if (str_contains($file->getPathname(), '/' . $targetDir . '/')) {
-                continue;
-            }
-
-            // The filename only, not the relative path
-            $filename = basename($file->getPathname());
-            $targetFilePath = $targetPath . '/' . $filename;
-
-            $result = $this->translateFile($file->getPathname(), $targetFilePath);
-
-            // Call the progress callback if provided
-            if ($progressCallback) {
-                call_user_func($progressCallback, $file->getPathname(), $result);
-            }
-        }
-
-        // Process subdirectories
-        $directories = File::directories($sourcePath);
-
-        foreach ($directories as $directory) {
-            // Skip the target directory itself
-            if (basename($directory) === $targetDir) {
-                continue;
-            }
-
-            // Create the subdirectory in the target
-            $subdirName = basename($directory);
-            $newTargetPath = $targetPath . '/' . $subdirName;
-
-            if (!File::isDirectory($newTargetPath)) {
-                File::makeDirectory($newTargetPath, 0755, true);
-            }
-
-            // Process files in this subdirectory
-            $this->processFilesInDirectory($directory, $newTargetPath, $targetDir, $progressCallback);
+            // Process files in the subdirectory recursively
+            $this->processDirectory($directory, $newTargetPath, $targetDir, $docBaseDir, $progressCallback, $latestOnly);
         }
     }
 
@@ -168,7 +127,7 @@ class TranslateDocsService
     }
 
     /**
-     * Translate a file and save it to the target path.
+     * Translate a markdown file and save it to the target path.
      *
      * @param string $sourcePath The source file path
      * @param string $targetPath The target file path
@@ -176,15 +135,6 @@ class TranslateDocsService
      */
     public function translateFile(string $sourcePath, string $targetPath): ?bool
     {
-        $extension = pathinfo($sourcePath, PATHINFO_EXTENSION);
-        $supportedExtensions = config('translation.supported_extensions', ['md', 'txt', 'html']);
-
-        // Skip non-text files or files that should not be translated
-        if (!in_array($extension, $supportedExtensions)) {
-            Log::warning("Skipping file with unsupported extension: {$sourcePath}");
-            return null; // Null indicates skipped
-        }
-
         Log::info("Translating: {$sourcePath}");
 
         try {
@@ -201,9 +151,9 @@ class TranslateDocsService
             $largeFileThreshold = config('translation.chunking.large_file_threshold', 10000);
             if (strlen($content) > $largeFileThreshold) {
                 Log::info("File is large, translating in chunks...");
-                $translatedContent = $this->translateLargeContent($content, $extension);
+                $translatedContent = $this->translateLargeContent($content);
             } else {
-                $translatedContent = $this->translateContent($content, $extension);
+                $translatedContent = $this->translateContent($content);
             }
 
             if ($translatedContent) {
@@ -223,24 +173,18 @@ class TranslateDocsService
     }
 
     /**
-     * Translate large content by breaking it into chunks.
+     * Translate large markdown content by breaking it into chunks.
      *
      * @param string $content The content to translate
-     * @param string $fileType The file type/extension
      *
      * @return string|null The translated content or null on failure
      */
-    public function translateLargeContent(string $content, string $fileType): ?string
+    public function translateLargeContent(string $content): ?string
     {
         Log::info("Breaking content into chunks for translation...");
 
-        // For Markdown, try to split at heading boundaries
-        if ($fileType === 'md') {
-            $chunks = $this->splitMarkdownContentIntoChunks($content);
-        } else {
-            // For other file types, split by paragraph or reasonable length
-            $chunks = $this->splitContentIntoChunks($content);
-        }
+        // Split at heading boundaries for markdown
+        $chunks = $this->splitMarkdownContentIntoChunks($content);
 
         Log::info("Content divided into " . count($chunks) . " chunks");
 
@@ -249,7 +193,7 @@ class TranslateDocsService
         foreach ($chunks as $index => $chunk) {
             Log::info("Translating chunk " . ($index + 1) . " of " . count($chunks));
 
-            $translatedChunk = $this->translateContent($chunk, $fileType);
+            $translatedChunk = $this->translateContent($chunk);
 
             if ($translatedChunk) {
                 $translatedChunks[] = $translatedChunk;
@@ -313,7 +257,7 @@ class TranslateDocsService
     }
 
     /**
-     * Split any content into chunks based on size.
+     * Split content into chunks based on size.
      *
      * @param string $content The content to split
      * @param int $maxChunkSize The maximum chunk size in characters
@@ -343,59 +287,6 @@ class TranslateDocsService
             $chunks[] = $currentChunk;
         }
 
-        // If a single paragraph is too large, we need to split it
-        foreach ($chunks as $i => $chunk) {
-            if (strlen($chunk) > $maxChunkSize) {
-                // Replace with smaller chunks
-                $subChunks = $this->forceSplitContent($chunk, $maxChunkSize);
-                array_splice($chunks, $i, 1, $subChunks);
-            }
-        }
-
-        return $chunks;
-    }
-
-    /**
-     * Force split content into chunks regardless of structure.
-     *
-     * @param string $content The content to split
-     * @param int $maxChunkSize The maximum chunk size in characters
-     *
-     * @return array The content split into chunks
-     */
-    public function forceSplitContent(string $content, int $maxChunkSize = 8000): array
-    {
-        $chunks = [];
-        $remaining = $content;
-
-        while (strlen($remaining) > 0) {
-            $chunkSize = min(strlen($remaining), $maxChunkSize);
-
-            // Try to find a sentence or line break near the chunk size
-            $breakPoint = $chunkSize;
-
-            // Search for a period, question mark, or exclamation point followed by whitespace
-            if ($chunkSize < strlen($remaining)) {
-                for ($i = $chunkSize - 1; $i >= $chunkSize - 200 && $i > 0; $i--) {
-                    if (preg_match('/[.!?]\s/', substr($remaining, $i, 2))) {
-                        $breakPoint = $i + 1;
-                        break;
-                    }
-                }
-
-                // If no sentence break found, try a newline
-                if ($breakPoint === $chunkSize) {
-                    $newlinePos = strrpos(substr($remaining, 0, $chunkSize), "\n");
-                    if ($newlinePos !== false && $newlinePos > $chunkSize - 200) {
-                        $breakPoint = $newlinePos + 1;
-                    }
-                }
-            }
-
-            $chunks[] = substr($remaining, 0, $breakPoint);
-            $remaining = substr($remaining, $breakPoint);
-        }
-
         return $chunks;
     }
 
@@ -403,13 +294,12 @@ class TranslateDocsService
      * Translate content using Claude API.
      *
      * @param string $content The content to translate
-     * @param string $fileType The file type/extension
      *
      * @return string|null The translated content or null on failure
      */
-    public function translateContent(string $content, string $fileType): ?string
+    public function translateContent(string $content): ?string
     {
-        $prompt = $this->buildTranslationPrompt($content, $fileType);
+        $prompt = $this->buildTranslationPrompt($content);
 
         try {
             $response = Http::withHeaders([
@@ -441,17 +331,15 @@ class TranslateDocsService
     }
 
     /**
-     * Build translation prompt based on content type.
+     * Build translation prompt for markdown.
      *
      * @param string $content The content to translate
-     * @param string $fileType The file type/extension
      *
      * @return string The translation prompt
      */
-    public function buildTranslationPrompt(string $content, string $fileType): string
+    public function buildTranslationPrompt(string $content): string
     {
-        if ($fileType === 'md') {
-            $instructions = <<<PROMPT
+        $instructions = <<<PROMPT
 I need this Markdown document translated to Japanese.
 
 IMPORTANT INSTRUCTIONS:
@@ -465,37 +353,6 @@ IMPORTANT INSTRUCTIONS:
 Here's the document to translate:
 
 PROMPT;
-        } elseif ($fileType === 'html') {
-            $instructions = <<<PROMPT
-I need this HTML document translated to Japanese.
-
-IMPORTANT INSTRUCTIONS:
-1. Translate ONLY the text content inside tags
-2. Preserve ALL HTML tags, attributes, and structure exactly as is
-3. DO NOT add any introduction or commentary like "Here's the translation"
-4. Start your response with the first character of the document
-5. Format the output exactly like the input, just with Japanese text
-6. Preserve all code examples unchanged
-
-Here's the document to translate:
-
-PROMPT;
-        } else {
-            $instructions = <<<PROMPT
-I need this text document translated to Japanese.
-
-IMPORTANT INSTRUCTIONS:
-1. Translate ONLY the text content
-2. Preserve ALL original formatting and structure exactly as is
-3. DO NOT add any introduction or commentary like "Here's the translation"
-4. Start your response with the first translated character of the document
-5. Format the output exactly like the input, just with Japanese text
-6. Preserve all code examples unchanged
-
-Here's the document to translate:
-
-PROMPT;
-        }
 
         return $instructions . "\n\n" . $content;
     }

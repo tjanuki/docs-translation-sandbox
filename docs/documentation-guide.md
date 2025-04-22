@@ -11,4 +11,3 @@ Our project uses several types of documentation:
 3. **Database Standards Documentation** - Outlines database implementation patterns and migration standards
 4. **Feature Documentation** - Explains specific features and their implementation
 5. **API Documentation** - Details API endpoints and usage
-
